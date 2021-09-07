@@ -10,7 +10,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ```
 
 # Introduction
-
+_
 The goal of this project is to develop an algorithm that tells us how convenient it is to sell or buy a currency in the foreign exchange market, Forex. The end purpose of this algorithm is to help us to make the most of our investment.
 
 We will evaluate some methods that are widely used across data science to forecast values, and one method that is commonly used in Forex markets.
