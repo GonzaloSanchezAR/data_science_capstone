@@ -1,0 +1,1416 @@
+---
+title: "Trading Project"
+author: "Gonzalo Sanchez"
+date: "07/28/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+The goal of this project is to develop an algorithm that tells us how convenient it is to sell or buy a currency in the foreign exchange market, Forex. The end purpose of this algorithm is to help us to make the most of our investment.
+
+We will evaluate some methods that are widely used across data science to forecast values, and one method that is commonly used in Forex markets.
+
+Note: According to Wikipedia, "The foreign exchange market is a global decentralized or over-the-counter market for the trading of currencies. This market determines foreign exchange rates for every currency"^a^.
+
+
+```{r Loading the basic libraries, echo=FALSE, warning=FALSE, error=FALSE, message=FALSE, results='hide'}
+library(tidyverse)
+library(dplyr)
+library(knitr)
+library(lubridate)
+```
+
+
+```{r Loading the data sets, echo=FALSE}
+#Since downloading the data set is a slow process, we will save them in a temp file.
+
+#Here we load the data set if it was previously saved
+temp_folder<-paste(dirname(tempdir()),"/CapstoneTempEdx/", sep = "") %>% str_replace_all("/","\\\\")    #we create a temp folder
+
+if(file.exists(paste(temp_folder,"dat.Rda",sep = ""))){
+  
+  load(paste(temp_folder,"dat.Rda",sep = "")) #loading the ds if already present
+  
+} else {
+  
+  dir.create(temp_folder)
+	dl <- tempfile()
+	download.file("https://raw.githubusercontent.com/johnsmith1232541/test/master/EURUSD_15m_BID_01.01.2010-31.12.2016.csv", dl)
+	  
+	dat<-read.csv(dl)
+	
+  rm(dl)
+  
+  save(dat,file=paste(temp_folder,"dat.Rda",sep = "")) #Saving the ds to make the process faster when reopened
+  
+}
+
+rm(temp_folder)
+```
+
+```{r Preprocessing the data sets, echo=FALSE}
+dat$Time <- 
+  dat$Time %>% 
+  parse_date_time("Ymd HM")
+```
+
+***
+
+# Materials
+
+We will develop our algorithm by analyzing a data set of exchange rates of euros (EUR) against United States Dollars (USD). The data set can be downloaded from the following link:
+
+[https://raw.githubusercontent.com/johnsmith1232541/test/master/EURUSD_15m_BID_01.01.2010-31.12.2016.csv]
+
+```{r exploring the dataset, echo=FALSE}
+
+#Showing the data set
+dat_show<-
+  dat %>% head()  %>% 
+  knitr::kable()
+
+#Number of rows and columns
+n_rows<-nrow(dat)
+n_cols<-ncol(dat)
+
+#Oldest and newest dates*********
+date_oldest<-dat$Time %>% min()
+date_newest<-dat$Time %>% max()
+
+
+#Limits***************************************
+limits_min<-data.frame(lapply(dat, min)) 
+limits_max<-data.frame(lapply(dat, max))
+
+limits<-
+  rbind(limits_min,
+      limits_max)
+
+limits<-
+  cbind(Limit=c("min", "max"),
+     limits)%>% 
+  knitr::kable()
+
+limits_difference<-
+  limits_max-limits_min
+
+limits_difference<-
+  limits_difference%>% 
+  knitr::kable()
+
+
+obs_per_day <-
+  dat %>% 
+  filter(year(Time)=="2013" & 
+           month(Time)=="2"& 
+           day(Time)=="2"  ) %>% nrow()
+
+meassurements_freq<-dat$Time[2]-dat$Time[1]
+
+```
+
+
+It consists of a table of *`r n_cols`* columns and *`r n_rows`* rows. Here we see the first rows:
+`r dat_show`
+
+The minimum and maximum values the columns have are: 
+`r limits`
+
+And the ranges over which the values in the columns vary are: 
+`r limits_difference`
+
+The data shows one observation every `r meassurements_freq` minutes. This means that each day contains  `r obs_per_day` measurements.
+
+The values *open*, *high*, *low*, and *close* represent the price of one euro in USD. The volume is in USD.
+
+The graph below shows how the closing price varied across the entire time range.  
+
+```{r Close price in the entire time range, echo=FALSE,out.width="75%", fig.align = "center"}
+  dat %>% 
+  select(c("Time","Close"))   %>% 
+  ggplot(aes(x=Time,y=Close)) + geom_line() 
+```
+Below is a graph showing the closing price and the volume during a random month.
+
+```{r Close and Volume in a short time period, echo=FALSE,out.width="75%", fig.align = "center"}
+  dat %>% 
+  select(c("Time","Close","Volume"))   %>% 
+  filter(year(Time)=="2013" & 
+           month(Time)=="2" ) %>% 
+  gather(key=variable, value=Value, -Time)%>%
+  ggplot(aes(x=Time,y=Value))+geom_line() + 
+  facet_grid(variable~., scales="free")
+```
+
+```{r removing variales_0, echo=FALSE,out.width="75%", fig.align = "center"}
+rm(limits_difference)
+rm(limits)
+rm(limits_max)
+rm(limits_min)
+rm(n_cols)
+rm(n_rows)
+rm(dat_show)
+rm(meassurements_freq)
+```
+
+
+During some time intervals, the prices remained the same. This is because the volume traded during those periods was zero. In fact, this happens from 10 PM on Friday to 10 PM on Sunday. Later, when we create algorithms to evaluate our predictions, we won't apply them to the periods of time where the volume is zero.
+
+***
+
+# Methods
+
+## Indicator Variable
+
+We want to predict how likely it is that the price will go up or down in the next time period. We will refer to this probability as the variable $\hat{indicator}$.
+
+The goal of this project is then to develop an algorithm to calculate an $\hat{indicator}$ that gives us the greatest profit from our investment.
+
+A positive value of $\hat{indicator_{i}}$ in the time period $i$ means that the price is going to rise in the time period $i+1$. A negative value means that the price is going to fall.
+
+We will also develop some algorithms that will estimate the future price itself instead of the probability of an increase or decrease in the price. In those cases, we define the $\hat{indicator}$ in the following way:  
+
+$$
+\begin{aligned}
+ \hat{indicator_{i}} =\frac{    \hat{price_{i+1}} - price_i }{price_i}
+\end{aligned}
+$$
+
+Where:
+
+* $price$: the closing price we know from our data frame
+* $\hat{price_{i+1}}$ : the predicted closing price of the next time period. 
+
+
+## Evaluation Parameters
+
+We will use two measurements to evaluate how well our predictions work:
+
+* *Percentage of match*: the percentage of times we correctly predicted a price increase or decrease in the period $i+1$.
+* *Final balance*: the amount of money we would end up with at the end of the time period if we used the predictions to buy or sell currencies.
+
+For the *Percentage of match*, we just need to compare the sign of $\hat{indicator_{i}}$ with that of $price_{i+1} - price_i$, and compute the percentage of the times these signs coincide.  
+
+For the *Final balance*, we will proceed as follows: 
+
+* If we predict that the price will rise in the next time period, we will buy according to the likelihood of the increase.
+* If we predict that the price will fall, we will sell it according to the likelihood of the decrease
+* We will sum the profit we get in each operation. 
+
+To achieve this, we will define three parameters:
+
+* $weight$ : a tuning parameter
+* $indicator_{min}$: the minimum of $\hat{indicator}$ divided by $weight$. When $\hat{indicator_{i}}$ is smaller than this value we sell all the euros that we have.
+* $indicator_{max}$: the maximum of $\hat{indicator}$ divided by  $weight$. When $\hat{indicator_{i}}$ is larger than this value we buy as many euros as we can.
+
+Our function will evaluate the value of $\hat{indicator_{i}}$ for each period, starting with the second time period up to the last one, and will calculate the fraction of the total investment to keep in euros ($eurfraction_i=eurfraction_i(\hat{indicator_{i})}$) with different linear functions depending on the value of  $\hat{indicator_{i}}$:
+
+
+```{r Showing the intervals for the EvaluationProfit in a chart,warning=FALSE, echo=FALSE,out.width="75%", fig.align = "center"}
+
+indicators<-c(-3,-2,-1,0,1,2)
+eurfraction<-c(0,0,0.25,0.5, 1,1)
+
+indicators_labels<-c("","indicator_min","","0","indicator_max","")
+
+eurfraction_text<-c(
+  expression(eurfraction == 0),
+  expression(eurfraction == -0.5*frac(hat(indicator)[i], indicator[min])+0.5),
+  expression(eurfraction == 0.5),
+  expression(eurfraction == 0.5*frac(hat(indicator)[i], indicator[max])+0.5),
+  expression(eurfraction == 1)
+)
+
+
+data.frame(indicators=indicators, eurfraction=eurfraction) %>% 
+   ggplot(aes(x=factor(indicators), y=eurfraction, group=1))+
+  geom_line()+
+  geom_text(x="-3",y=0.05, label=(eurfraction_text[1]),parse = TRUE,hjust  = "left")+
+  geom_text(x="-2",y=0.25, label=(eurfraction_text[2]),parse = TRUE,hjust  = "left")+
+  geom_text(x="0",y=0.5, label=(eurfraction_text[3]),parse = TRUE,hjust  = "left")+
+  geom_text(x="0",y=0.75, label=(eurfraction_text[4]),parse = TRUE,hjust  = "left")+
+  geom_text(x="2",y=0.95, label=(eurfraction_text[5]),parse = TRUE,hjust  = "right")+   
+  scale_x_discrete(breaks =indicators, 
+                     labels= indicators_labels)+
+  xlab(expression(hat(indicator)[i]))+
+  theme_grey()
+
+
+rm(eurfraction)
+rm(eurfraction_text)
+rm(indicators_labels)
+rm(indicators)
+```
+  
+We will start each time period with:  
+$$
+\begin{aligned}
+USD_{i-1}&\\ 
+EUR_{i-1}&\\
+investment_i&=USD_{i-1} + EUR_{i-1} *Price_i
+\end{aligned}
+$$
+Where $USD_{i-1}$ are the dollars we have from the previous time period,  $EUR_{i-1}$ are the euros from the previous time period, and $investment_i$ is the total investment at the beginning of the time period (since now the price is $Price_i$).
+
+At the end of the time period, after having traded, we will have:
+$$
+\begin{aligned}
+USD_i&=investment_i * (1-eurfraction_i) \\
+EUR_i&=investment_i *eurfraction_i/Price_i
+\end{aligned}
+$$
+The $investment_i$ remains constant here, since we only changed the currencies in which we store it. We make or lose money only at the beginning of the time period, depending on the increase or decrease of the $Price_i$.
+
+```{r Function to calculate the Final Balance, message=FALSE, echo=FALSE}
+
+EvaluationProfit<-  
+  function(Prices, indicator, usd_initial,eur_initial,weight){
+    
+    #Starting variables
+    operations_total<-Prices %>%  length()
+
+    #Maximum and minimum of the indicator
+    indicator_max<-max(indicator)/weight
+    indicator_min<-min(indicator)/weight
+    
+    #Vectors to store results 
+    usd_v<-vector(mode = "numeric", length = operations_total)
+    eur_v<-vector(mode = "numeric", length = operations_total)
+    total_v<-vector(mode = "numeric", length = operations_total)
+
+    total_v[1]<-usd_initial + eur_initial * Prices[1] 
+    usd_v[1]<-usd_initial
+    eur_v[1]<-eur_initial
+    #for explanation about this formulas, see the chart above
+    for (i in c(2:operations_total)) {
+    
+      total_v[i]<-usd_v[i-1] + eur_v[i-1] *Prices[i]
+
+      if(indicator[i]<=indicator_min){
+        eur_fraction<-0
+        
+      }else if (indicator[i]>indicator_min & indicator[i]<0){
+        eur_fraction<-  -0.5/indicator_min*indicator[i]+0.5
+        
+      }else if (indicator[i]==0){
+        eur_fraction<-0.5
+      }
+
+      else if (indicator[i]>0 & indicator[i]<indicator_max){
+        eur_fraction<-  0.5/indicator_max*indicator[i]+0.5
+      
+      }else if (indicator[i]>=indicator_max){
+        eur_fraction<-1
+      }
+
+      #Partial Balance
+      usd_v[i]<-total_v[i]*(1-eur_fraction)
+      eur_v[i]<-(total_v[i]-usd_v[i])/Prices[i]
+    }
+
+    #Calculating the percentage match***********************************************
+    price_diference<-data.frame(Price_i_plus_one=c(tail(Prices, -1)),
+                                price_i=c(head(Prices, -1))) %>% 
+    mutate(diference=Price_i_plus_one-price_i) %>% .$diference
+    price_diference<-c(price_diference,0)
+    
+    match_pct<-data.frame(indicators=indicator,price_diference=price_diference ) %>% 
+      mutate(predictions=sign(indicators)==sign(price_diference)) %>% 
+      summarise(match_fraction=mean(predictions)) %>% 
+      .$match *100
+    #*******************************************************************************
+    
+    #Preparing the results******************************************
+    table<-data.frame(
+      total=total_v[operations_total],
+      usd=usd_v[operations_total],
+      eur=eur_v[operations_total],
+      match_pct=match_pct) %>%
+      knitr::kable()
+    
+    timed_data<-data.frame(total=total_v,usd=usd_v,eur=eur_v)
+    result<-list(timed_data=timed_data,
+                 usd=usd_v[operations_total],
+                 eur=eur_v[operations_total],
+                 total=total_v[operations_total],
+                 match_pct=match_pct,
+                 table=table)
+    #***************************************************************
+    
+    return(result)
+  }
+
+```
+
+
+
+## Initial Investment
+
+In every case we will start with an initial investment of 100 USD, consisting of only 100 USD and 0 EUR.
+
+```{r Initial Investment,warning=FALSE,message=FALSE, echo=FALSE}
+investment_ini<-100
+```
+
+## Data Partitions
+
+We will partition our data set into two smaller ones:
+
+* *dat_train*: a training data set covering 75% of the time
+* *dat_test*: a test data set covering the remaining 25% of the time
+
+To develop the algorithms, we will use just a small portion of our training set, that will consist of only the 2013 data. We call it *dat_train_2013*. 
+
+```{r Creating data partitions,warning=FALSE,message=FALSE, echo=FALSE}
+
+date_range<-date_newest-date_oldest
+
+dat_train<- dat %>% filter(Time<date_oldest+date_range*0.75)
+dat_test<- dat %>% filter(Time>=date_oldest+date_range*0.75)
+
+#Selection of a small subset of data to make the analysis faster when developing functions********
+dat_train_2013<-
+  dat_train %>% 
+  filter(year(Time)=="2013") %>%
+  select(c("Time","Close","Volume"))
+#************************************************************************************************
+
+rm(date_oldest)
+rm(date_newest)
+rm(date_range)
+rm(dat)
+```
+
+
+ 
+
+```{r Creating a Time Serie, message=FALSE,echo=FALSE}
+
+#Some of the libraries that we are going to use work with $ts$ objects. These objects store time series, which can be thought of as a list of numbers, along with some information about what times those numbers were recorded.
+#Source:https://otexts.com/fpp2/ts-objects.html 
+  
+
+#When defining a $ts$ object we need to specify which time unit to use. This is done with the frequency parameter. We will define our period to be one day, so the frequency will be the number of observations that are present in one day.
+
+ts_dat_train_2013 <-ts(dat_train_2013,
+                       start=1,
+                       frequency=obs_per_day
+                       ) 
+```
+
+## Reference Results
+
+Here we present some simple calculations that will serve us as reference values.
+
+### Theoretical Maximum Final Balance
+
+If we knew that the next time period the price of the euro will go down, we would sell all the euros we have right now.    
+In the same way, if we knew the price will go up, we would buy as many euros as we can, because they're still cheap.  
+Since we already know the prices in each instant in the data sets, we can calculate the profit we would make when performing these operations.
+
+For this purpose, we are going calculate the $indicator_i$ in the following way:
+
+$$
+\begin{aligned}
+ \hat{indicator_{i}} =\frac{    price_{i+1} - price_i }{price_i}
+\end{aligned}
+$$
+
+Where $price_{i+1}$ is the actual price in the next time period.  
+
+When calculating the evaluation parameters using this $indicator_i$ for the *dat_train_2013* data set we find:
+
+```{r Calculating the Theoretical Maximum Final Balance,warning=FALSE,message=FALSE, echo=FALSE}
+indicator_maximum<-function(ds){
+  
+  indicators<-vector(mode = "numeric", length = nrow(ds))  #Vector to store results 
+      
+      for (i in c(1:(nrow(ds)-1))) {
+      
+        Close_i  <-ds$Close[i]
+        Close_next  <-ds$Close[i+1]
+  
+          if(Close_next>Close_i){
+            indicators[i]<-1
+          }else if(Close_next<Close_i){
+            indicators[i]<--1
+          }else if(Close_next==Close_i){
+            indicators[i]<- 0} 
+      }
+  return(indicators)
+}
+
+indicators<-indicator_maximum(dat_train_2013)
+
+EvaluationProfit(dat_train_2013$Close, indicators, investment_ini,0,1) %>%
+  .$table
+```
+
+This will be our roof. We will not pretend to make more money or get a higher *pct_match* than this prediction.
+
+
+
+### Theoretical Minimum Final Balance
+
+In a completely different scenario, we can calculate how much money we would end up with if we failed to guess the best deal in each opportunity we have. 
+
+For this purpose, we are going calculate the $indicator_i$ in the following way:
+
+$$
+\begin{aligned}
+ \hat{indicator_{i}} =-\frac{    price_{i+1} - price_i }{price_i}
+\end{aligned}
+$$
+
+Where $price_{i+1}$ is the actual price in the next time period.  
+
+When calculating the evaluation parameters using this $indicator_i$ for the *dat_train_2013* data set we find:
+
+```{r Calculating the Theoretical Minimum Final Balance,warning=FALSE,message=FALSE, echo=FALSE}
+indicator_minimum<-function(ds){
+  
+  indicators<-vector(mode = "numeric", length = nrow(ds))  #Vector to store results 
+      
+      for (i in c(1:(nrow(ds)-1))) {
+      
+        Close_i  <-ds$Close[i]
+        Close_next  <-ds$Close[i+1]
+  
+          if(Close_next>Close_i){
+            indicators[i]<--1
+          }else if(Close_next<Close_i){
+            indicators[i]<-1
+          }else if(Close_next==Close_i){
+            indicators[i]<- 0} 
+      }
+  return(indicators)
+}
+
+indicators<-indicator_minimum(dat_train_2013)
+
+EvaluationProfit(dat_train_2013$Close, indicators, investment_ini,0,1) %>%
+  .$table
+```
+
+We will keep this in mind to remember that sometimes even a small decrease in our investment is not the worst possible scenario. We see that the *pct_match* is above zero. This is because when there was no change in the price, our indicator predicts it correctly. Nevertheless, when there is no change in price, there is no way to make or lose money. 
+
+
+### Remaining in USD
+The most conservative approach would be to keep the entire investment in dollars, and not to operate one single time. With this approach we would end up with the same amount of dollars that we started with, that is, *`r investment_ini`* USD.  
+
+
+### Remaining in EUR
+
+Another more or less conservative approach would be to buy EUR with our initial investment, and to keep them until the end of the period. To calculate the amount we end up with  we only have to do:  
+
+$$
+\begin{aligned}
+ USD_N=USD_1*\frac{Close_N}{Close_1}
+\end{aligned}
+$$
+With this approach we would end up with
+```{r Calculating profit when remaining in EUR, echo=FALSE, message=FALSE, warning=FALSE}
+
+remaining_in_eur<-function(ds){
+  
+  operations_count<-ds %>% nrow()
+
+  result<-list(usd=0,
+               eur=investment_ini/ds$Close[1],
+               total=investment_ini* ds$Close[operations_count]/ds$Close[1],
+               match_pct=NA)
+  return(result)
+}
+profit_remaining_in_eur<-remaining_in_eur(dat_train_2013) 
+
+data.frame(profit_remaining_in_eur[c("usd", "eur", "total", "match_pct")] )%>%
+      knitr::kable()
+
+rm(profit_remaining_in_eur)
+```
+
+
+## Naïve Method
+
+A little less conservative approach is to suppose that the future price will be equal to the current one. This is:
+
+$$
+\begin{aligned}
+\hat{price}_{i+1}=price_i
+\end{aligned}
+$$
+
+This method works remarkably well for many economic and financial time series^b^.
+
+```{r installing the forecast package if neccesary, warning=FALSE, error=FALSE, message=FALSE, results='hide', echo=FALSE}
+if(!require(forecast)) install.packages("forecast", repos = "http://cran.us.r-project.org")
+```
+
+Since with this method we predict the price, and not the probability of a price increase or decrease, we will calculate the $indicators$ according to the formula we had previously shown.
+
+```{r Naive Approach, message=FALSE, warning=FALSE, echo=FALSE}
+library(forecast)
+
+naive_model<-naive(dat_train_2013$Close, 2)
+naive_fitted<-naive_model$fitted
+
+#First prediction with Näive approach is NA, so we exclude the first row
+indicators<-(naive_fitted[-1]-dat_train_2013$Close[-1])/dat_train_2013$Close[-1]
+rm(naive_fitted)
+rm(naive_model)
+```
+
+Before calculating the profit we can make with these $indicators$, we need to tune the $weight$ parameter. For doing so, we will evaluate the *Final balance* for values of *weight* going from 1 to 500, and we will select the value that gives the greatest *Final balance*.  
+
+```{r Tunning the weight parameter, message=FALSE, echo=FALSE}
+
+#Function where the only input is the tuning. It's necessary in order to use sapply
+profits_evaluation_weight<-function(weight){
+  result<-
+    EvaluationProfit(dat_train_2013$Close[-1], indicators,investment_ini,0,weight) %>%
+    .$total
+  return(result)
+}
+
+weight_tune<-seq(from = 1, to = 500, by =1)
+
+results_weight<-sapply(weight_tune , profits_evaluation_weight)
+
+#the parameters of this best profits were
+best_index<-which.max(na.omit(results_weight) ) #Index of the best result
+weight_max<-weight_tune[best_index]             #the best parameter
+```
+
+```{r Tunning the weight parameter-plot,echo=FALSE, message=FALSE,out.width="45%", fig.align = "center"}
+  best_result<- data.frame(parameter=weight_max,result=results_weight[best_index])   #Data.frame for the label
+
+  cbind(weight=weight_tune,profit=results_weight) %>%
+    data.frame() %>%
+    ggplot(aes(x=weight,y=profit)) +geom_point()+
+    geom_label(data = best_result,aes(x = parameter, y =result , label = weight_max))
+  
+  rm(weight_tune)
+  rm(results_weight)
+  rm(best_result)
+  rm(best_index)
+```
+
+With this approach we end up with:
+
+```{r Naive Approach_profit, message=FALSE, warning=FALSE, echo=FALSE}
+profit_naive<-
+  EvaluationProfit(dat_train_2013$Close[-1], indicators, investment_ini,0,weight_max)
+profit_naive_k<-profit_naive %>%.$table
+
+rm(indicators)
+```
+
+`r profit_naive_k`
+
+
+
+## Exponential Smoothing
+  
+In this section we will discuss other forecasting methods, those where the foretasted values are weighted averages of past observations, with the weights decaying exponentially as the observations get older.^c^
+
+There are several kinds of exponential smoothing methods, but we will not describe them here. Rather, we will work with a function that chooses the best fitting model.
+
+
+### The ets() function
+
+The models can be estimated in R using the $ets()$ function in the forecast package. The $ets()$ function does not produce forecasts. Rather, it estimates the model parameters and returns information about the fitted model.^d^ To select the best model it uses some criteria that will not be discussed here.
+
+We will first determine the model and the best smoothing parameters. Since the $ets$ package does not support seasonality for frequencies larger than 24,^e^ we are going to create another data set, where we will randomly choose one sample every hour, so we reduce the frequency to 24. We will call this ts *dat_train_2013_F*.
+
+```{r Creating a Time Serie with 24 values a day, message=FALSE, echo=FALSE}
+
+#Choosing 24 operations a day********************************************************
+dat_train_F <-dat_train_2013 %>%
+   mutate(DayHour=paste(year(Time),month(Time),day(Time),hour(Time),sep = "-")) %>%
+   group_by(DayHour) %>%
+   sample_n(1)%>% ungroup()
+
+dat_train_F <- dat_train_F[order(dat_train_F$Time),]
+dat_train_F<-dat_train_F %>% select(-c(DayHour))
+#**********************************************************************************
+
+#Creating a Time Series with the 24 day frequency DS*********
+ts_dat_train_2013_F <-ts(dat_train_F,
+                        start=1,
+                        frequency=24
+                        )
+#************************************************************
+```
+
+
+```{r Using the ETS for determining the models in the 24 frequency TS,out.width="75%", fig.align = "center",warning=FALSE, echo=FALSE}
+ets_model<-ets(ts_dat_train_2013_F[,c("Close")])
+```
+
+When analyzing the $Close$ variable, we find that the best model is `r ets_model`.  
+
+
+The notation $ETS(Error,Trend,Seasonal)$ means^f^ that the error is additive, and there is no trend or seasonal component.^g^ Since the lack of support for the seasonal component was the only reason for reducing the frequency, we won't need to reduce it, so we will use the *dat_train_2013*.
+
+```{r Using the ETS for determining the models,warning=FALSE, echo=FALSE}
+
+#removing the variables of frequency=24 
+rm(dat_train_F) 
+rm(ts_dat_train_2013_F)
+
+ets_model<-ets(ts_dat_train_2013[,c("Close")])
+ets_parameters<- ets_model$par %>% head() %>% knitr::kable() 
+```
+
+Of course, the best model when using this ts is `r ets_model`, and the best smoothing parameters are:  
+`r ets_parameters`
+
+Here is a plot of the fitted values for the $Close$ variable, together with the prediction of the next 500 closing prices: 
+```{r plotting the fitted values and the forecasts with ets ,out.width="75%", fig.align = "center",warning=FALSE, echo=FALSE}
+ets_forecast = forecast(ets_model, h=500) # forecast 500/96 days into the future
+plot(ets_forecast)
+```
+
+
+
+Each observation in a time series can be forecast using all previous observations. We call these "fitted values" and they are denoted by  $\hat{price}_{i|i-1}$ , meaning the forecast of $price_i$ based on observations $price_1,…,price_{i-1}$.  
+Fitted values always involve one-step forecasts. Actually, fitted values are often not true forecasts because any parameters involved in the forecasting method are estimated using all available observations in the time series, including future observations.^h^
+
+Regardless of this consideration, we will analyze the evaluation parameters that we get with the model selected by the $ets()$ function:
+
+```{r Calculating profits with the model selected by the ets, echo=FALSE}
+
+ets_fitted<-ets_model$fitted
+indicators<-(ets_fitted-ts_dat_train_2013[,c("Close")]) /ts_dat_train_2013[,c("Close")]
+
+profit_ets<-
+  EvaluationProfit(ts_dat_train_2013[,c("Close")],indicators,investment_ini,0,weight_max)
+
+profit_ets_K<-profit_ets %>%
+  .$table
+
+rm(indicators)
+```
+
+`r profit_ets_K`
+
+Here we see how our investment behaved over the time period:  
+```{r plotting the investment with the model selected by the ets, echo=FALSE,out.width="75%", fig.align = "center"}
+ cbind(dat_train_2013,profit_ets$timed_data)%>%
+ gather(key=variable, value=Value, -Time) %>%
+   filter(variable %in% c("Close","eur","total")) %>%
+ ggplot(aes(x=Time,y=Value))+geom_line() +
+ facet_grid(variable~., scales="free")
+
+```
+
+
+## ARIMA
+
+ARIMA models provide another approach to time series forecasting. Exponential smoothing and ARIMA models are the two most widely used approaches to time series forecasting, and provide complementary approaches to the problem. While exponential smoothing models are based on a description of the trend and seasonality in the data, ARIMA models aim to describe the autocorrelations in the data.^i^
+
+We will use the $auto.arima()$ to determine the model and the best parameters:
+
+```{r Exploring ARIMA, out.width="75%", fig.align = "center", echo=FALSE}
+arima_model <- auto.arima(ts_dat_train_2013[,c("Close")]) 
+arima_forecast = forecast(arima_model, h=500)
+plot(arima_forecast)
+```
+Here are the evaluation parameters we get when using the indicator calculated with the prices predicted by $auto.arima()$:
+
+```{r ARIMA profit, echo=FALSE}
+arima_fitted<-arima_model$fitted
+indicators<-(arima_fitted-ts_dat_train_2013[,c("Close")]) /ts_dat_train_2013[,c("Close")]
+
+profit_arima<-
+  EvaluationProfit(ts_dat_train_2013[,c("Close")],indicators,investment_ini,0,weight_max)
+
+profit_arima_K<-profit_arima %>%  .$table
+
+rm(indicators)
+```
+`r profit_arima_K`
+
+Here we see how our investment behaved over the time period:  
+
+```{r ARIMA trend, echo=FALSE,out.width="75%", fig.align = "center"}
+ cbind(dat_train_2013,profit_arima$timed_data)%>%
+ gather(key=variable, value=Value, -Time) %>%
+   filter(variable %in% c("Close","eur","total")) %>%
+ ggplot(aes(x=Time,y=Value))+geom_line() +
+ facet_grid(variable~., scales="free")
+```
+
+
+
+## TBATS
+
+This model is designed for use when there are multiple cyclic patterns (e.g. daily, weekly and yearly patterns) in a single time series. Maybe it will be able to detect complicated patterns in our time series.^j^
+
+```{r Exploring TBATS, out.width="75%", fig.align = "center", echo=FALSE}
+tbats_model = tbats(ts_dat_train_2013[,c("Close")])
+tbats_forecast = forecast(tbats_model, h=500)
+plot(tbats_forecast)
+```
+
+With the model and parameters from the $tbats$ function we end up with:  
+```{r TBATS profits, echo=FALSE}
+tbats_fitted<-tbats_model$fitted
+
+indicators<-(tbats_fitted-ts_dat_train_2013[,c("Close")]) /ts_dat_train_2013[,c("Close")]
+
+profit_tbats<-
+  EvaluationProfit(ts_dat_train_2013[,c("Close")],indicators,investment_ini,0,weight_max)
+
+profit_tbats_K<-profit_tbats %>%  .$table
+
+rm(indicators)
+```
+`r profit_tbats_K`
+
+Here we see how our investment behaved over the time period: 
+
+```{r TBATS trend, echo=FALSE,out.width="75%", fig.align = "center"}
+ cbind(dat_train_2013,profit_tbats$timed_data)%>%
+ gather(key=variable, value=Value, -Time) %>%
+   filter(variable %in% c("Close","eur","total")) %>%
+ ggplot(aes(x=Time,y=Value))+geom_line() +
+ facet_grid(variable~., scales="free")
+```
+
+## Summary of the first methods
+The next table shows a comparison of all the methods we analyzed up to this point:
+
+```{r Comparing results, echo=FALSE,out.width="75%", fig.align = "center"}
+rbind(
+  data.frame(Method="Naive",profit_naive[c("usd", "eur", "total", "match_pct")] ),
+  data.frame(Method="Exponential Smoothing",profit_ets[c("usd", "eur", "total", "match_pct")] ),
+  data.frame(Method="ARIMA",profit_arima[c("usd", "eur", "total", "match_pct")] ),
+  data.frame(Method="TBATS",profit_tbats[c("usd", "eur", "total", "match_pct")] )
+)%>%
+      knitr::kable()
+
+```
+
+We can see that all these models produce very similar results. In each method's forecast graph we also see that the predictions are always constant, so they don't follow any trend other than the current value. Therefore, in order to keep things as simple as possible, and to save computer resources, we are going to select only the Näive method, and we will not consider the other ones. 
+
+We can also see that the eur variable varies a lot in consecutive time periods in these methods. This means that in order to arrive to these results, we had to carry out a lot of operations.
+
+
+
+```{r Deleting variables_1, message=FALSE, echo=FALSE}
+#Näive
+rm(profit_naive_k)
+rm(profit_naive)
+
+#ETS()
+rm(ets_parameters)
+rm(ets_forecast)
+rm(ets_model)
+rm(ets_fitted)
+rm(profit_ets)
+rm(profit_ets_K)
+
+#ARIMA
+rm(arima_forecast)
+rm(arima_model)
+rm(arima_fitted)
+rm(profit_arima)
+rm(profit_arima_K)
+
+#TBATS
+rm(tbats_forecast)
+rm(tbats_model)
+rm(tbats_fitted)
+rm(profit_tbats)
+rm(profit_tbats_K)
+
+```
+
+## The MACD Model
+
+MACD, short for **moving average convergence divergence**, is a trading indicator used in technical analysis of stock prices. It is designed to reveal changes in the strength, direction, momentum, and duration of a trend in a stock's price.^k^
+
+The MACD indicator is a collection of three time series calculated from historical price data, most often the closing price. These three series are:
+
+* *MACD*: difference between a "fast" (short period) exponential moving average (EMA), and a "slow" (longer period) EMA of the price series.
+* *Signal*: exponential moving average of the MACD series itself. 
+* *Histogram*: difference between the MACD and the signal.^l^
+
+The MACD indicator thus depends on three time parameters, namely the time constants of the three EMAs. These parameters are usually measured in days^k^. They are the following:
+
+* Fast: the short period (most common value= 12)
+* Slow: the long period (most common value= 26)
+* Sig: the period of the EMA with which the signal is calculated (most common value= 9)
+
+
+### Trading interpretation ^k^
+
+Most traders look at the following three signals to make decisions: 
+
+#### Signal-line crossover:
+A "signal-line crossover" occurs when the MACD and signal lines cross; that is, when the histogram changes sign. The standard interpretation of such an event is a recommendation to buy if the MACD line crosses up through the average line (a "bullish" crossover), or to sell if it crosses down through the average line (a "bearish" crossover). These events are taken as indications that the trend in the stock is about to accelerate in the direction of the crossover.
+
+#### Zero crossover:
+A "zero crossover" event occurs when the MACD series changes sign, that is, the MACD line crosses the horizontal zero axis. This happens when there is no difference between the fast and slow EMAs of the price series. A change from positive to negative MACD is interpreted as "bearish", and from negative to positive as "bullish". Zero crossovers provide evidence of a change in the direction of a trend but less confirmation of its momentum than a signal line crossover.
+
+#### Divergence:
+A "positive divergence" or "bullish divergence" occurs when the price makes a new low, but the MACD does not confirm with a new low of its own. A "negative divergence" or "bearish divergence" occurs when the price makes a new high, but the MACD does not confirm with a new high of its own. A proper approach to divergence requires an evaluation that is beyond the scope of this work, and even for an expert eye it can lead to false conclusions.^m^ For this reasons, we are not going to use it here. 
+
+
+
+### Using the MACD series as predictors
+
+We will use the MACD function in the TTR package to obtain the MACD and signal for the closing price in the *dat_train_2013*. The histogram series will be calculated as the difference between the MACD and the signal. We will start using the default MACD parameters.
+
+```{r Installing the macd packages, echo=FALSE, out.width="75%",warning=FALSE, error=FALSE, message=FALSE, results='hide', fig.align = "center"}
+if(!require(TTR)) install.packages("TTR", repos = "http://cran.us.r-project.org")
+library(TTR)
+if(!require(quantmod)) install.packages("quantmod", repos = "http://cran.us.r-project.org")
+library(quantmod)
+```
+
+When calculating the MACD series, we don't get values for the rows for which there is not data for producing the EMAs. In fact, when using the default parameters, we don't get values of the MACD series for periods previous to the 26th day, and we don't get values of the signal series for periods earlier than the 35th day (Slow=26,Sig=9). 
+Here we see the first rows of our data set for which we obtain some results of the signal series.
+
+
+```{r EXPLORING MACD, message=FALSE, echo=FALSE}
+m_macd<-
+  dat_train_2013[,"Close"] %>%
+  MACD(nFast = 12*obs_per_day, 
+       nSlow = 26*obs_per_day, 
+       nSig = 9*obs_per_day, 
+       maType="EMA"
+       )
+
+#new data set joining the macd series together with the dat_train_2013 ds 
+#We will ignore the rows where the MACD is NA
+m_macd<-
+  cbind(dat_train_2013,m_macd) %>%
+  filter(!is.na(signal))%>% 
+  filter(Volume>0)%>% 
+  mutate(histogram=macd-signal)
+
+m_macd_show<-m_macd %>%head() %>%knitr::kable()
+```
+
+`r m_macd_show`
+
+```{r Deleting variables_2, message=FALSE, echo=FALSE}
+rm(m_macd_show)
+```
+
+
+The following chart is a classic representation of the MACD series in a stock price chart. In the upper part we see the closing price. In the bottom part we see MACD in gray and the signal in red. The gray graph in the bottom part is the histogram series. 
+
+```{r MACD VUSUALIZER, message=FALSE, echo=FALSE, fig.align = "center"}
+dat_train_2013_xts<- xts(dat_train_2013[,2], order.by = as.Date(dat_train_2013[,1]))
+chartSeries(dat_train_2013_xts, TA="addMACD(fast = 12*96,slow = 26*96, signal = 9*96,type='EMA')", theme=chartTheme("white"))
+#Source: https://www.youtube.com/watch?v=VNpPNW2gzy4&ab_channel=EXFINSISExpertFinancialAnalysis
+#Source2: https://bookdown.org/kochiuyu/technical-analysis-with-r-second-edition/macd.html
+
+rm(dat_train_2013_xts)
+
+```
+
+We will analyze individually the first two strategies we mentioned earlier, and we will combine them in the end.
+
+
+#### Signal-line crossover \hfill\break
+ \hfill\break
+We can notice 2 scenarios here:
+  
+* *MACD line crosses up through the average line*: we are advised to buy
+* *MACD line crosses down through the average line*: we are advised to sell
+
+To use this strategy, we will consider the following facts:
+
+* $histogram=MACD-Signal$. 
+* We are looking for a cross between the MACD and signal series, that is, a point in which the difference between the two series is zero.
+* We are interested in knowing if the MACD line was above or below the signal line before the crossover.
+
+We will use the sign of *histogram* to calculate $\hat{indicator}$, so we are going to make $\hat{indicator_i}=sign(histogram_i)$. When using this $\hat{indicator}$, we get the following evaluation parameters:
+
+```{r Signal-line crossover, message=FALSE, echo=FALSE, fig.align = "center"}
+profit_macd<-
+  EvaluationProfit(m_macd$Close, sign(m_macd$histogram), investment_ini,0,weight_max)
+profit_macd %>%  .$table
+```
+
+In the following chart we see how our investment behaved over the time period:
+
+```{r Signal-line crossover-plot, message=FALSE, echo=FALSE,out.width="75%", fig.align = "center"}
+profit_macd_gathered<-
+  cbind(m_macd,profit_macd$timed_data)%>%
+  gather(key=variable, value=Value, -Time) 
+
+profit_macd_gathered%>% filter(variable %in% c("Close", "histogram","eur","total")) %>%
+  ggplot(aes(x=Time,y=Value))+geom_line() + 
+  facet_grid(variable~., scales="free")  
+```
+
+#### Zero crossover \hfill\break
+ \hfill\break
+We can notice 2 scenarios here:
+
+* *MACD line goes from negative to positive*: we are advised to buy. Before the crossover the MACD was negative.
+* *MACD line goes from positive to negative*: we are advised to sell. Before the crossover the MACD was positive.
+
+To use this strategy, we will consider the following facts:
+
+* We are looking for a cross of the MACD through the zero line.
+* We are interested in knowing if the MACD line was above or below the zero line before the crossover.
+* The $\hat{indicator}$ variable tells us to buy when it is positive, and to sell when it is negative. This is the opposite of the behavior of the zero crossover.
+
+We will use the sign of *macd* to calculate $\hat{indicator}$, so we are going to make $\hat{indicator_i}=-sign(macd_i)$. When using this $\hat{indicator}$, we end up with:
+
+```{r Zero crossover, message=FALSE, echo=FALSE,out.width="75%", fig.align = "center"}
+profit_macd<-
+  EvaluationProfit(m_macd$Close, -sign(m_macd$macd), investment_ini,0,weight_max)
+profit_macd_t<-profit_macd %>%  .$table
+```
+
+`r profit_macd_t`
+
+In the following chart we see how our investment behaved over the time period:
+```{r Zero crossover-plot, message=FALSE, echo=FALSE,out.width="75%", fig.align = "center"}
+profit_macd_gathered<-
+  cbind(m_macd,profit_macd$timed_data)%>%
+  gather(key=variable, value=Value, -Time) 
+
+profit_macd_gathered%>% filter(variable %in% c("Close", "macd","eur","total")) %>%
+  ggplot(aes(x=Time,y=Value))+geom_line() + 
+  facet_grid(variable~., scales="free")  
+
+rm(profit_macd_t)
+rm(profit_macd_gathered)
+rm(m_macd)
+```
+
+#### Combining the two strategies \hfill\break
+ \hfill\break
+For combining these two strategies, we will filter the times when the $indicators$ calculated with the previous two strategies coincide, and we will calculate the resulting evaluation parameters with these $indicators$:
+
+```{r Combining thw two strategies, message=FALSE, echo=FALSE,out.width="75%", fig.align = "center"}
+
+#Function that combine the two methods. We will use it to calculate the profit
+macd_results<-function(ds, USD, EUR,Weight, Fast, Slow, Sig){
+  m_macd<-
+    ds[,"Close"] %>%
+      MACD(nFast = Fast, 
+           nSlow = Slow, 
+           nSig = Sig, 
+           maType="EMA"
+           )
+
+m_macd<-
+  cbind(ds,m_macd) %>%
+  filter(!is.na(signal))%>% 
+  filter(Volume>0)%>% 
+  mutate(histogram=macd-signal) %>% 
+  mutate(indicator_sl=sign(histogram),indicator_zc=-sign(macd)) %>%
+  mutate(indicator =ifelse(indicator_sl==indicator_zc,indicator_sl,0))%>% 
+  filter(indicator!=0)
+  
+  profit_macd<-
+    EvaluationProfit(m_macd$Close, m_macd$indicator, USD,EUR,Weight)
+  
+  profit_macd$timed_data<-
+    cbind(Time=m_macd$Time, profit_macd$timed_data)
+
+  return(profit_macd)
+
+}
+
+profit_macd<-macd_results(dat_train_2013, investment_ini, 0,weight_max, 12*obs_per_day, 26*obs_per_day, 9*obs_per_day)
+profit_macd %>%  .$table
+
+
+
+#Showing how it varied in the time period
+profit_macd_gathered<-
+  left_join(dat_train_2013,profit_macd$timed_data,"Time") %>%
+  gather(key=variable, value=Value, -Time) %>% filter(variable %in% c("Close","eur","total"))
+
+ggplot(data=profit_macd_gathered[!(is.na(profit_macd_gathered$Value)),],aes(x=Time,y=Value))+geom_line() + 
+  facet_grid(variable~., scales="free") 
+
+rm(profit_macd_gathered)
+rm(profit_macd)
+
+```
+We see an improvement in combining the two strategies. Notice that the partial loses in the total variable here are smaller than in the two previous charts.
+
+
+
+### Tuning the MACD parameters
+
+There are three parameters we can tune in the MACD model: $Fast$, $Slow$ and $Sig$. Since the results we may get vary with the three of them, we cannot tune them independently of each other. For this reason, we will generate a series of combinations of them, and we will evaluate the final balance we get with each one of these combinations.
+
+We will evaluate all the possible combinations of 6 values above and six values below the default parameters:
+```{r Combinatinos of MACD tuning parameters, message=FALSE, echo=FALSE}
+Fast<-seq(6,18, 1)
+Slow<-seq(20,32, 1) #The minimum of Slow must be greater than the maximum of Fast
+Sig<-seq(3,15, 1)
+
+period_first<-(max(Slow)+max(Sig)) #to compare data sets starting the same day
+
+combinations<-crossing(Fast = Fast, Slow = Slow, Sig = Sig) 
+```
+
+
+* Fast: `r Fast`
+* Slow: `r Slow`
+* Sig: `r Sig`
+
+```{r Function that returns the Final balance for the MACD, message=FALSE, echo=FALSE}
+
+#Function that only returns the Final balance:
+
+profits_macd<-function(Fast,Slow,Sig,period_first, weight,time_close, USD,EUR){
+  
+  if(Fast<=Slow){    #Fast must be smaller than Slow for the MACD to work
+
+    #calculating the MACD
+    operations_number<-time_close %>% nrow()
+    profit<-macd_results(time_close[period_first:operations_number,], 
+                              USD, EUR,weight, Fast, Slow, Sig)
+    
+    return(profit$total)
+    
+  }else{
+    
+    return(NA)
+  }
+}  
+
+```
+
+
+```{r Function for tuning the MACD Parameters, message=FALSE, echo=FALSE}
+
+#This function uses the previous one to calculate the combination that gives us the largest Final balance.
+
+macd_tuning<-function(fFast,fSlow,fSig,investment_ini,weight_max,ds,period_first){
+
+  parameter_tuning<- mapply(profits_macd,
+                           Fast=fFast,
+                           Slow=fSlow,
+                           Sig= fSig, 
+                           MoreArgs = list(period_first=period_first,
+                                           time_close = ds, 
+                                           weight= weight_max,
+                                           USD=investment_ini,
+                                           EUR=0)
+                           )
+  
+  parameter_tuning<- cbind(Fast=fFast,
+                           Slow=fSlow,
+                           Sig= fSig,
+                           profit=parameter_tuning) %>%
+    data.frame()
+  parameter_best<-parameter_tuning[which.max(parameter_tuning$profit),]
+
+  return(list(parameter=parameter_tuning,best=parameter_best))
+}
+```
+
+
+The combinations that produced the greatest profits were the following: 
+
+```{r Tuning all the combination parameters , message=FALSE, echo=FALSE,out.width="45%", fig.align = "center"}
+
+Combination_Tuning<-
+  macd_tuning(combinations$Fast*obs_per_day,
+              combinations$Slow*obs_per_day,
+              combinations$Sig*obs_per_day,
+              investment_ini,
+              weight_max,
+              dat_train_2013,
+              period_first*obs_per_day)
+
+
+
+Combination_Tuning$parameter %>% 
+  arrange(desc(profit))%>% 
+  mutate(Fast=Fast/obs_per_day, Slow=Slow/obs_per_day, Sig=Sig/obs_per_day) %>% 
+  head() %>%
+  knitr::kable()
+
+parameter_best<-Combination_Tuning$parameter[which.max(Combination_Tuning$parameter$profit),]%>% 
+  mutate(Fast=Fast/obs_per_day, Slow=Slow/obs_per_day, Sig=Sig/obs_per_day, Total=profit) %>% 
+  select(Fast, Slow, Sig, Total)
+
+```
+
+We choose the parameters that give us the greatest final balance, so our choice are the parameters in the first row. We will evaluate if these values of the parameters follow any logic. We will keep two parameters constant at their best value, and we will evaluate the final balance we get with  different values of the third parameter.
+
+#### Fast parameter \hfill\break 
+ \hfill\break
+
+```{r Showing the Fast parameter-Plot , message=FALSE, echo=FALSE,out.width="45%", fig.align = "center"}
+best_result<- 
+  data.frame(parameter=parameter_best$Fast,result=parameter_best$Total)   #Data.frame for the label
+
+annotations <- data.frame(
+   xpos = 16,
+   ypos =  109,
+   annotateText = c(paste("Fast=","variable","\n", "Slow=", parameter_best$Slow,"\n Sig=",parameter_best$Sig)))
+
+Combination_Tuning$parameter%>% 
+  mutate(Fast=Fast/obs_per_day, Slow=Slow/obs_per_day, Sig=Sig/obs_per_day)  %>%
+  filter(Slow==parameter_best$Slow,Sig==parameter_best$Sig)%>%
+    ggplot(aes(x=Fast,y=profit)) +geom_point()+
+    geom_label(data = best_result,aes(x = parameter, y =result , label = parameter_best$Fast))+
+    geom_text(data = annotations, aes(x=xpos,y=ypos,label=annotateText))
+
+rm(annotations)
+rm(best_result)
+```
+
+
+#### Slow parameter \hfill\break
+ \hfill\break
+```{r Showing the Slow parameter-Plot , message=FALSE, echo=FALSE,out.width="45%", fig.align = "center"}
+best_result<- 
+  data.frame(parameter=parameter_best$Slow,result=parameter_best$Total)   #Data.frame for the label
+
+annotations <- data.frame(
+   xpos = 30,
+   ypos =  109,
+   annotateText = c(paste("Fast=",parameter_best$Fast,"\n", "Slow=", "variable","\n Sig=",parameter_best$Sig)))
+
+Combination_Tuning$parameter%>% 
+  mutate(Fast=Fast/obs_per_day, Slow=Slow/obs_per_day, Sig=Sig/obs_per_day)  %>%
+  filter(Fast==parameter_best$Fast,Sig==parameter_best$Sig)%>%
+    ggplot(aes(x=Slow,y=profit)) +geom_point()+
+    geom_label(data = best_result,aes(x = parameter, y =result , label = parameter_best$Slow))+
+    geom_text(data = annotations, aes(x=xpos,y=ypos,label=annotateText))
+
+rm(annotations)
+rm(best_result)
+```
+
+
+#### Sig parameter \hfill\break
+ \hfill\break
+```{r Showing the Sig parameter-Plot , message=FALSE, echo=FALSE,out.width="45%", fig.align = "center"}
+best_result<- 
+  data.frame(parameter=parameter_best$Sig,result=parameter_best$Total)   #Data.frame for the label
+
+
+annotations <- data.frame(
+   xpos = 5,
+   ypos =  108,
+  annotateText = c(paste("Fast=",parameter_best$Fast,"\n", "Slow=", parameter_best$Slow,"\n Sig=variable")))
+
+Combination_Tuning$parameter%>% 
+  mutate(Fast=Fast/obs_per_day, Slow=Slow/obs_per_day, Sig=Sig/obs_per_day)  %>%
+  filter(Fast==parameter_best$Fast,Slow==parameter_best$Slow)%>%
+    ggplot(aes(x=Sig,y=profit)) +geom_point()+
+    geom_label(data = best_result,aes(x = parameter, y =result , label = parameter_best$Sig))+
+    geom_text(data = annotations, aes(x=xpos,y=ypos,label=annotateText))
+
+rm(annotations)
+rm(best_result)
+```
+
+Using these tuning parameters in the MACD model, the evaluation parameters become:  
+```{r MACD with the best parameters profits, echo=FALSE}
+
+profit_macd<-
+  macd_results(dat_train_2013, investment_ini, 0,weight_max, 
+               parameter_best$Fast*obs_per_day, 
+               parameter_best$Slow*obs_per_day, 
+               parameter_best$Sig*obs_per_day)
+
+
+profit_macd_tuned_t<-profit_macd %>%  .$table
+
+```
+
+`r profit_macd_tuned_t`
+
+Here we see how our investment behaved over the time period: 
+
+```{r  MACD with the best parameters trend, echo=FALSE,out.width="75%", fig.align = "center"}
+
+#Showing how it varied in the time period
+profit_macd_gathered<-
+  left_join(dat_train_2013,profit_macd$timed_data,"Time") %>%
+  gather(key=variable, value=Value, -Time) %>% filter(variable %in% c("Close","eur","total"))
+
+ggplot(data=profit_macd_gathered[!(is.na(profit_macd_gathered$Value)),],aes(x=Time,y=Value))+geom_line() + 
+  facet_grid(variable~., scales="free") 
+
+rm(profit_macd_gathered)
+rm(parameter_best)
+rm(Combination_Tuning)
+rm(profit_macd)
+```
+
+
+We see a small improvement. Notice that the final balance we made is smaller than the final balance we calculated when we were just tuning the parameters. This is because when tuning the parameters, we had to compare equal time intervals, so we started from the time period where the combination of the greatest *Fast* and *Sig* had values in the signal series. 
+
+# Results
+
+We will apply the two selected methods: Näive and MACD, to the  *dat_test*.
+
+## Näive
+
+There is no need to train the algorithm for this approach, so we will use the *dat_test* to calculate the $indicators$ and the evaluation parameters, which become:
+
+```{r Naive Approach- test data set, message=FALSE, warning=FALSE, echo=FALSE}
+naive_model<-naive(dat_test$Close, 2)
+naive_fitted<-naive_model$fitted
+
+indicators<-(naive_fitted[-1]-dat_test$Close[-1]) /dat_test$Close[-1]
+rm(naive_fitted)
+rm(naive_model)
+```
+
+
+
+```{r Naive Approach_profit-evaluation parameters, message=FALSE, warning=FALSE, echo=FALSE}
+profit_naive<-
+  EvaluationProfit(dat_test$Close[-1], indicators, investment_ini,0,weight_max)
+profit_naive_k<-profit_naive %>%.$table
+
+rm(indicators)
+```
+
+`r profit_naive_k`
+
+## MACD
+
+For the MACD, we have to train our algorithm with the *dat_train* data set, and then evaluate the results on the *dat_test*.
+
+We first calculate the best parameters:
+
+```{r training the macd algorithm with the train dataset, echo=FALSE}
+
+Combination_Tuning<-
+  macd_tuning(combinations$Fast*obs_per_day,
+              combinations$Slow*obs_per_day,
+              combinations$Sig*obs_per_day,
+              investment_ini,
+              weight_max,
+              dat_train,
+              period_first*obs_per_day)
+
+
+parameter_best<-Combination_Tuning$parameter[which.max(Combination_Tuning$parameter$profit),]%>% 
+  mutate(Fast=Fast/obs_per_day, Slow=Slow/obs_per_day, Sig=Sig/obs_per_day, Total=profit) %>% 
+  select(Fast, Slow, Sig, Total) 
+
+
+parameter_best%>% knitr::kable()
+
+```
+
+
+Using them, we calculate the evaluation parameters on the *dat_test*:
+
+```{r MACD with the best parameters profits-test data set, echo=FALSE}
+profit_macd<-
+  macd_results(dat_test, investment_ini, 0,weight_max, 
+               parameter_best$Fast*obs_per_day, 
+               parameter_best$Slow*obs_per_day, 
+               parameter_best$Sig*obs_per_day
+               )
+
+profit_macd_tuned_t<-profit_macd %>%  .$table
+```
+
+
+`r profit_macd_tuned_t`
+
+Here we see how our investment behaved over the time period:
+
+```{r  MACD with the best parameters trend-test set, echo=FALSE,out.width="75%", fig.align = "center"}
+#Showing how it varied in the time period
+profit_macd_gathered<-
+  left_join(dat_test,profit_macd$timed_data,"Time") %>%
+  gather(key=variable, value=Value, -Time) %>% filter(variable %in% c("Close","eur","total"))
+
+ggplot(data=profit_macd_gathered[!(is.na(profit_macd_gathered$Value)),],aes(x=Time,y=Value))+geom_line() + 
+  facet_grid(variable~., scales="free") 
+```
+We see some big lows, and at the last periods we not only lost all what we have made, but even more. 
+
+## Comparison
+
+Here is a summary of these results, together with the results of the conservative methods when applied to the  *dat_test*:
+
+
+```{r Comparing results on the test set, echo=FALSE,out.width="75%", fig.align = "center"}
+
+#Maximum theoretical Final Balance
+indicators<-indicator_maximum(dat_test)
+profit_max<-EvaluationProfit(dat_test$Close, indicators, investment_ini,0,weight_max) 
+
+#Minimum theoretical Final Balance
+indicators<-indicator_minimum(dat_test)
+profit_min<-EvaluationProfit(dat_test$Close, indicators, investment_ini,0,weight_max) 
+
+
+#Final Balance if remaining in eur
+profit_remaining_in_eur<-remaining_in_eur(dat_test)
+
+rbind(
+  data.frame(Method="Theoretical maximum",profit_max[c("total", "match_pct")] ),
+  data.frame(Method="Theoretical minimum",profit_min[c("total", "match_pct")] ),  
+  data.frame(Method="Remaininig in usd",total=100, match_pct=NA),
+  data.frame(Method="Remaininig in eur",profit_remaining_in_eur[c("total", "match_pct")] ),
+  data.frame(Method="Näive",profit_naive[c("total", "match_pct")] ),
+  data.frame(Method="MACD",profit_macd[c("total", "match_pct")] )
+  
+)%>% mutate(total=round(total,2),match_pct=round(match_pct,2)) %>% 
+      knitr::kable()
+
+```
+
+***
+
+# Conclusion
+We selected two methods with complementary strengths. The Näive method offers the largest profit, but the MACD approach requires the least number of trading operations.
+
+Only with the Näive method we managed to make greater profits than the conservative methods, but it did not produce a profit anywhere near the theoretical maximum of `r round(profit_max$total)` dollars.
+
+***
+
+# Further research
+
+* We analyzed buying or selling in each specific time period. We should still develop a rule to decide if the opportunities of future profit are good enough to make the operation. For this, here are some ideas to consider:
+  + We can include a prediction of more than one time interval.
+  + We can decide whether to operate or not according to the variation of $indicator_i$, not only according to its value.
+  + The MACD worked quite well in this respect, so maybe we should try to combine methods, and to include the MACD, or some variation of it.
+* We have not analyzed the relationship between the prices and the volume.
+* We haven't analyzed the open, high or low prices.
+* We didn't analyze long term cycles. Maybe there is some seasonality in the peaks we see in mid-2011 and mid-2014, and in the valleys of mid-2010 and 2012.
+* We only analyzed a time series of euro and dollar prices. Since we want to know if it's more convenient to buy euros or other currencies, we must extend the analysis to other currencies.
+
+***
+
+# Bibliography  
+
+^a^ https://en.wikipedia.org/wiki/Foreign_exchange_market  
+^b^ https://otexts.com/fpp2/simple-methods.html#simple-methods  
+^c^ https://otexts.com/fpp2/expsmooth.html  
+^d^ https://otexts.com/fpp2/estimation-and-model-selection.html  
+^e^ https://robjhyndman.com/hyndsight/longseasonality/  
+^f^ https://otexts.com/fpp2/ets.html  
+^g^ https://otexts.com/fpp2/taxonomy.html  
+^h^ https://otexts.com/fpp2/residuals.html  
+^i^ https://otexts.com/fpp2/arima.html  
+^j^ https://www.linkedin.com/pulse/forecasting-time-series-r-eric-kramer/  
+^k^ https://en.wikipedia.org/wiki/MACD/  
+^l^ https://www.investorsunderground.com/technical-indicators/macd-moving-average-convergence-divergence  
+^m^ https://www.investopedia.com/articles/active-trading/100115/why-macd-divergence-unreliable-signal.asp   
+
+
